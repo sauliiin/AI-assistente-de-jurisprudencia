@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistente de jurisprudência</title>
+<style>
+  :root {
+    --fundo: #f6f5f1; --painel: #ffffff; --texto: #1d1f23; --suave: #5d6470; --borda: #dedbd2;
+    --acento: #1f5f8b; --acento-fundo: #e6eff6; --alerta: #9a4b00; --ok: #2e6b3a; --ruim: #8b2c2c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --fundo: #15171a; --painel: #1e2125; --texto: #e7e8ea; --suave: #9aa1ab; --borda: #33373d;
+      --acento: #7ab6e0; --acento-fundo: #1d2c38; --alerta: #e0a060; --ok: #7cc48a; --ruim: #e08a8a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fundo); color: var(--texto); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 18px 16px 8px; max-width: 980px; margin: 0 auto; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 1.2rem; margin: 0; }
+  header .status { color: var(--suave); font-size: .85rem; }
+  main { max-width: 980px; margin: 0 auto; padding: 0 16px 140px; }
+  .turno { margin: 18px 0 26px; }
+  .pergunta { font-weight: 600; background: var(--acento-fundo); border-radius: 10px; padding: 10px 14px; display: inline-block; }
+  .resposta { background: var(--painel); border: 1px solid var(--borda); border-radius: 10px; padding: 14px 16px; margin-top: 10px; overflow-wrap: anywhere; }
+  .resposta p { margin: .4em 0; } .resposta ul { margin: .3em 0; padding-left: 1.3em; }
+  .cit { display: inline-block; min-width: 1.5em; text-align: center; font-size: .78rem; font-weight: 700; color: var(--acento);
+         background: var(--acento-fundo); border-radius: 6px; padding: 0 4px; margin: 0 1px; cursor: pointer; vertical-align: 1px; }
+  .cit.invalida { color: var(--ruim); text-decoration: line-through; }
+  .meta { color: var(--suave); font-size: .8rem; margin-top: 8px; }
+  .aviso { color: var(--alerta); font-size: .85rem; margin-top: 6px; }
+  details.fontes { margin-top: 10px; } details.fontes summary { cursor: pointer; color: var(--suave); font-size: .9rem; }
+  .fonte { border: 1px solid var(--borda); background: var(--painel); border-radius: 8px; padding: 8px 12px; margin: 6px 0; font-size: .88rem; }
+  .fonte.destaque { outline: 2px solid var(--acento); }
+  .fonte .topo { font-weight: 600; } .fonte .sub { color: var(--suave); }
+  .res-deferido, .res-parcialmente { color: var(--ok); } .res-indeferido { color: var(--ruim); }
+  .panorama { white-space: pre-wrap; font-size: .85rem; color: var(--suave); border-left: 3px solid var(--borda); padding-left: 10px; margin: 8px 0; }
+  .cursor::after { content: "▍"; animation: pisca 1s steps(2) infinite; color: var(--suave); }
+  @keyframes pisca { 50% { opacity: 0; } }
+  form { position: fixed; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, var(--fundo) 30%); padding: 22px 16px 16px; }
+  .caixa { max-width: 980px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 48px; max-height: 180px; padding: 12px; font: inherit; color: var(--texto);
+             background: var(--painel); border: 1px solid var(--borda); border-radius: 10px; }
+  button { font: inherit; padding: 11px 16px; border-radius: 10px; border: 0; background: var(--acento); color: var(--fundo); cursor: pointer; font-weight: 600; }
+  button.sec { background: transparent; color: var(--suave); border: 1px solid var(--borda); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .opcoes { max-width: 980px; margin: 6px auto 0; color: var(--suave); font-size: .82rem; display: flex; gap: 14px; flex-wrap: wrap; }
+  .exemplos { color: var(--suave); } .exemplos button { background: var(--painel); color: var(--texto); border: 1px solid var(--borda); font-weight: 400; margin: 4px 4px 0 0; padding: 6px 10px; font-size: .88rem; }
+  @media (max-width: 600px) { .caixa { flex-wrap: wrap; } textarea { flex-basis: 100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Assistente de jurisprudência</h1>
+  <span class="status" id="status">carregando…</span>
+</header>
+<main id="conversa">
+  <div class="exemplos" id="exemplos">
+    <p>Funciona sem internet: a busca e o modelo de linguagem rodam neste computador. Cada resposta cita as decisões usadas; confira sempre a fonte.</p>
+    <button>Como as Juntas decidem pedidos de cancelamento de auto por cunha de terra no passeio?</button>
+    <button>Quantas decisões sobre mesas e cadeiras sem licença foram deferidas?</button>
+    <button>A falta de notificação prévia anula o auto de infração?</button>
+    <button>Qual foi o resultado do protocolo 31.00960807/2025-31?</button>
+  </div>
+</main>
+<form id="form">
+  <div class="caixa">
+    <textarea id="pergunta" placeholder="Pergunte sobre as decisões… (Enter envia, Shift+Enter quebra linha)" rows="1"></textarea>
+    <button id="enviar" type="submit">Perguntar</button>
+    <button id="nova" class="sec" type="button" title="Começa uma conversa nova">Nova</button>
+  </div>
+  <div class="opcoes"><label><input type="checkbox" id="pensar"> raciocinar antes de responder (mais lento)</label></div>
+</form>
+<script>
+const $ = (s) => document.querySelector(s);
+let conversa = null;
+const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+fetch("/api/status").then((r) => r.json()).then((s) => {
+  $("#status").textContent = `${s.decisoes.toLocaleString("pt-BR")} decisões · ${s.pareceres} pareceres · modelo ${s.modelo}`;
+}).catch(() => { $("#status").textContent = "servidor indisponível"; });
+
+function markdown(texto, nFontes) {
+  const linhas = esc(texto).split("\n");
+  let html = "", lista = false;
+  for (let l of linhas) {
+    l = l.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+         .replace(/\[(\d{1,2})\]/g, (_, n) => `<span class="cit${+n >= 1 && +n <= nFontes ? "" : " invalida"}" data-n="${n}">${n}</span>`);
+    const item = l.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)/);
+    if (item) { if (!lista) { html += "<ul>"; lista = true; } html += `<li>${item[1]}</li>`; continue; }
+    if (lista) { html += "</ul>"; lista = false; }
+    l = l.replace(/^#{1,4}\s*(.*)/, "<strong>$1</strong>");
+    if (l.trim()) html += `<p>${l}</p>`;
+  }
+  return html + (lista ? "</ul>" : "");
+}
+
+function dataBR(d) { return d ? d.split("-").reverse().join("/") : "data ?"; }
+
+function cartaoFonte(f) {
+  if (f.tipo === "panorama") {
+    return `<div class="fonte" data-n="${f.numero}"><div class="topo">[${f.numero}] Panorama do acervo</div><div class="panorama">${esc(f.texto)}</div></div>`;
+  }
+  if (f.tipo === "parecer") {
+    return `<div class="fonte" data-n="${f.numero}"><div class="topo">[${f.numero}] ${esc(f.titulo)}</div>
+      ${f.link ? `<a href="${esc(f.link)}" target="_blank" rel="noopener">abrir no Drive (requer internet)</a>` : ""}</div>`;
+  }
+  const classe = "res-" + (f.resultado || "").split(" ")[0];
+  return `<div class="fonte" data-n="${f.numero}">
+    <div class="topo">[${f.numero}] Protocolo ${esc(f.protocolo)} · <span class="${classe}">${esc(f.resultado || "resultado ?")}</span></div>
+    <div class="sub">${esc(f.instancia)} · sessão ${dataBR(f.data)}${f.motivo ? " · " + esc(f.motivo) : ""}</div>
+    <div>${esc(f.infracoes.join("; "))}</div>
+    ${f.dispositivo ? `<div class="sub">Dispositivo: ${esc(f.dispositivo)}</div>` : ""}
+    ${f.link ? `<a href="${esc(f.link)}" target="_blank" rel="noopener">abrir decisão no Drive (requer internet)</a>` : ""}</div>`;
+}
+
+async function perguntar(pergunta) {
+  $("#exemplos")?.remove();
+  const turno = document.createElement("section");
+  turno.className = "turno";
+  turno.innerHTML = `<div class="pergunta"></div><div class="resposta cursor"><span class="meta">buscando no acervo…</span></div>
+    <details class="fontes"><summary>Fontes</summary><div class="lista"></div></details><div class="rodape"></div>`;
+  turno.querySelector(".pergunta").textContent = pergunta;
+  $("#conversa").appendChild(turno);
+  turno.scrollIntoView({ behavior: "smooth", block: "start" });
+  const caixa = turno.querySelector(".resposta");
+  let texto = "", nFontes = 0, inicio = performance.now();
+  $("#enviar").disabled = true;
+
+  try {
+    const resp = await fetch("/api/perguntar", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pergunta, conversa, pensar: $("#pensar").checked }) });
+    const leitor = resp.body.getReader(), dec = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await leitor.read();
+      if (done) break;
+      buffer += dec.decode(value, { stream: true });
+      let fim;
+      while ((fim = buffer.indexOf("\n\n")) >= 0) {
+        const bloco = buffer.slice(0, fim); buffer = buffer.slice(fim + 2);
+        if (!bloco.startsWith("data:")) continue;
+        const ev = JSON.parse(bloco.slice(5));
+        if (ev.tipo === "conversa") { conversa = ev.id; if (ev.fila) caixa.innerHTML = '<span class="meta">aguardando outra resposta terminar…</span>'; }
+        else if (ev.tipo === "fontes") {
+          nFontes = ev.fontes.length;
+          turno.querySelector(".lista").innerHTML = ev.fontes.map(cartaoFonte).join("");
+          turno.querySelector("summary").textContent = `Fontes (${nFontes})`;
+          caixa.innerHTML = `<span class="meta">${nFontes} fontes encontradas; o modelo está lendo…</span>`;
+        } else if (ev.tipo === "texto") {
+          texto += ev.texto;
+          caixa.innerHTML = markdown(texto.replace(/<think>[\s\S]*?(<\/think>|$)/, ""), nFontes);
+        } else if (ev.tipo === "fim") {
+          caixa.classList.remove("cursor");
+          caixa.innerHTML = markdown(ev.resposta, nFontes);
+          let rod = `<div class="meta">${ev.segundos} s · leu ${ev.tokens_contexto ?? "?"} tokens (${ev.leitura_tps} tok/s) · escreveu ${ev.tokens_resposta ?? "?"} (${ev.escrita_tps} tok/s)</div>`;
+          if (ev.citacoes_invalidas.length) rod += `<div class="aviso">Atenção: citou fontes inexistentes (${ev.citacoes_invalidas.join(", ")}).</div>`;
+          else if (!ev.citadas.length) rod += `<div class="aviso">A resposta não citou fontes; confira antes de usar.</div>`;
+          turno.querySelector(".rodape").innerHTML = rod;
+        } else if (ev.tipo === "erro") {
+          caixa.classList.remove("cursor");
+          caixa.innerHTML = `<div class="aviso">${esc(ev.mensagem)}</div>`;
+        }
+      }
+    }
+  } catch (e) {
+    caixa.classList.remove("cursor");
+    caixa.innerHTML = `<div class="aviso">Falha: ${esc(String(e))}</div>`;
+  }
+  $("#enviar").disabled = false;
+  $("#pergunta").focus();
+}
+
+$("#conversa").addEventListener("click", (e) => {
+  const cit = e.target.closest(".cit");
+  if (cit) {
+    const turno = cit.closest(".turno"), det = turno.querySelector("details");
+    det.open = true;
+    turno.querySelectorAll(".fonte").forEach((f) => f.classList.toggle("destaque", f.dataset.n === cit.dataset.n));
+    turno.querySelector(`.fonte[data-n="${cit.dataset.n}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  const ex = e.target.closest(".exemplos button");
+  if (ex) perguntar(ex.textContent);
+});
+$("#form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const p = $("#pergunta").value.trim();
+  if (!p || $("#enviar").disabled) return;
+  $("#pergunta").value = "";
+  perguntar(p);
+});
+$("#pergunta").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#form").requestSubmit(); }
+});
+$("#pergunta").addEventListener("input", (e) => { e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; });
+$("#nova").addEventListener("click", () => { conversa = null; $("#conversa").innerHTML = ""; $("#pergunta").focus(); });
+</script>
+</body>
+</html>
