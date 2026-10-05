@@ -30,13 +30,16 @@ from pathlib import Path
 import numpy as np
 import scipy.sparse as sp
 
-from .config import ACERVO, PASTA_DADOS
+from . import normas
+from .config import ACERVO, ENTENDIMENTO, PASTA_DADOS
 from .texto import RESULTADOS, chave_infracao, normalizar, resultado_da_decisao, tokenizar
 
 VOTOS = ACERVO / "site_data" / "votos.jsonl"
 PARECERES = ACERVO / "site_data" / "pareceres.jsonl"
+LEGISLACAO = ACERVO / "site_data" / "legislacao.jsonl"
+ENTENDIMENTO_ARQUIVO = re.compile(r"ENTENDIMENTO JUNTAS", re.I)
 IA_SITE = ACERVO / "site_data" / "ia"
-VERSAO_INDICE = 8
+VERSAO_INDICE = 9
 # Peso de cada lista na fusão (BM25 da decisão, BM25 do melhor trecho, rede neural); ver assistente/avaliar.py.
 PESOS_FUSAO = (1.0, 1.0, 1.0)
 
@@ -116,7 +119,7 @@ def so_digitos(texto: str) -> str:
 class Decisao:
     indice: int
     file_id: str
-    tipo: str  # "voto" ou "parecer"
+    tipo: str  # "entendimento", "legislacao", "parecer", "voto" ou "panorama"
     titulo: str
     protocolo: str = ""
     assunto: str = ""
@@ -136,8 +139,12 @@ class Decisao:
 
     def cabecalho(self) -> str:
         """Ficha da decisão escrita a partir dos dados estruturados (não do texto livre)."""
+        if self.tipo == "entendimento":
+            return f"ENTENDIMENTO DAS JUNTAS (Vade Mecum de jurisprudência administrativa, 2024): {self.titulo}"
+        if self.tipo == "legislacao":
+            return f"LEGISLAÇÃO (texto vigente): {self.titulo}" + (f" ({self.assunto})" if self.assunto else "")
         if self.tipo == "parecer":
-            return f"Parecer técnico: {self.titulo}"
+            return f"PARECER TÉCNICO: {self.titulo}"
         partes = [f"Protocolo {self.protocolo}" if self.protocolo else f"Arquivo {self.titulo[:80]}"]
         if self.instancia:
             partes.append(self.instancia)
@@ -287,11 +294,21 @@ def _bm25(docs: list[list[str]], k1: float = 1.2, b: float = 0.75) -> tuple[sp.c
 
 
 class Acervo:
-    """Votos + pareceres, com os índices de busca. Use Acervo.carregar()."""
+    """Entendimento das Juntas, legislação, pareceres e votos, com os índices de busca. Use Acervo.carregar()."""
 
     def __init__(self) -> None:
         self.decisoes: list[Decisao] = []
         self.pareceres: list[Decisao] = []
+        self.entendimento: list[Decisao] = []
+        self.legislacao: list[Decisao] = []
+        self.bm25_ent: sp.csc_matrix
+        self.vocab_ent: dict[str, int] = {}
+        self.idf_ent: np.ndarray
+        self.bm25_leg: sp.csc_matrix
+        self.vocab_leg: dict[str, int] = {}
+        self.idf_leg: np.ndarray
+        # (('lei', 9725), '31') -> posição do artigo em self.legislacao
+        self.artigo_citado: dict[tuple[tuple[str, int], str], int] = {}
         self.bm25: sp.csc_matrix
         self.vocab: dict[str, int] = {}
         self.idf: np.ndarray
@@ -318,7 +335,8 @@ class Acervo:
     def carregar(cls, verboso: bool = True) -> "Acervo":
         cache = PASTA_DADOS / "indice.pkl"
         assinatura = [VERSAO_INDICE] + [
-            (p.name, p.stat().st_size, int(p.stat().st_mtime)) for p in (VOTOS, PARECERES) if p.exists()
+            (p.name, p.stat().st_size, int(p.stat().st_mtime))
+            for p in (VOTOS, PARECERES, LEGISLACAO, ENTENDIMENTO) if p and p.exists()
         ]
         inicio = time.time()
         acervo = None
@@ -340,10 +358,13 @@ class Acervo:
         acervo._carregar_rede_neural()
         if verboso:
             print(
-                f"Acervo: {len(acervo.decisoes)} decisões e {len(acervo.pareceres)} pareceres "
-                f"({time.time() - inicio:.1f} s)",
+                f"Acervo: {len(acervo.entendimento)} tópicos do Entendimento das Juntas, "
+                f"{len(acervo.legislacao)} artigos de legislação, {len({p.file_id for p in acervo.pareceres})} pareceres "
+                f"e {len(acervo.decisoes)} decisões ({time.time() - inicio:.1f} s)",
                 flush=True,
             )
+            if not acervo.entendimento:
+                print("[aviso] Entendimento das Juntas não encontrado no acervo nem em ASSISTENTE_ENTENDIMENTO.", flush=True)
         return acervo
 
     @classmethod
@@ -398,11 +419,17 @@ class Acervo:
         )
 
         # Pareceres: indexados por trecho, porque são longos e tratam de vários temas.
+        # O Entendimento das Juntas também está nessa pasta do Drive, mas é fonte própria (ver abaixo).
         docs_par = []
+        entendimento = None
         if PARECERES.exists():
             with PARECERES.open(encoding="utf-8") as fh:
                 for linha in fh:
                     p = json.loads(linha)
+                    if ENTENDIMENTO_ARQUIVO.match(p.get("nome_arquivo", "")):
+                        if "2024" in p["nome_arquivo"]:
+                            entendimento = p
+                        continue
                     trechos = dividir_em_trechos(p.get("texto") or "", alvo=900)
                     for n, trecho in enumerate(trechos):
                         acervo.pareceres.append(
@@ -419,6 +446,41 @@ class Acervo:
                         docs_par.append(termos(f"{p.get('nome_arquivo', '')} {trecho}"))
         if docs_par:
             acervo.bm25_par, acervo.vocab_par, acervo.idf_par = _bm25(docs_par)
+
+        # Entendimento das Juntas: um item por tópico do sumário.
+        if ENTENDIMENTO and ENTENDIMENTO.exists():
+            paragrafos, link = normas.paragrafos_docx(ENTENDIMENTO), ""
+        elif entendimento:
+            paragrafos, link = normas.paragrafos_texto(entendimento.get("texto") or ""), entendimento.get("drive_view_url") or ""
+        else:
+            paragrafos, link = [], ""
+        for topico in normas.topicos_entendimento(paragrafos):
+            acervo.entendimento.append(Decisao(
+                indice=len(acervo.entendimento), file_id=f"entendimento#{len(acervo.entendimento)}",
+                tipo="entendimento", titulo=topico["titulo"], link=link,
+                trechos=dividir_em_trechos(topico["texto"], alvo=700),
+            ))
+        if acervo.entendimento:
+            # O nome do próprio tópico conta duas vezes: "1.4 - Autuação para roçar lote penhorado" diz do que ele trata.
+            acervo.bm25_ent, acervo.vocab_ent, acervo.idf_ent = _bm25(
+                [termos(f"{e.titulo.split(' › ')[-1]} {e.titulo} {' '.join(e.trechos)}") for e in acervo.entendimento]
+            )
+
+        # Legislação: um item por artigo (ou item de anexo) vigente.
+        if LEGISLACAO.exists():
+            for u in normas.unidades_legislacao(LEGISLACAO):
+                pos = len(acervo.legislacao)
+                acervo.legislacao.append(Decisao(
+                    indice=pos, file_id=f"{u['norma']}#{u['rotulo']}", tipo="legislacao",
+                    titulo=f"{u['norma']}, {u['rotulo']}", assunto=u["contexto"], link=u["link"],
+                    trechos=dividir_em_trechos(u["texto"], alvo=700),
+                ))
+                if u["tipo"] == "artigo" and " " in u["norma"]:
+                    tipo, numero = u["norma"].split(" ", 1)
+                    acervo.artigo_citado.setdefault((normas.chave_norma(tipo, numero), u["numero"]), pos)
+            acervo.bm25_leg, acervo.vocab_leg, acervo.idf_leg = _bm25(
+                [termos(f"{d.titulo} {d.assunto} {' '.join(d.trechos)}") for d in acervo.legislacao]
+            )
         return acervo
 
     def _carregar_rede_neural(self) -> None:
@@ -511,27 +573,63 @@ class Acervo:
         sim[i] = -9
         return [int(j) for j in np.argsort(-sim)[:k]]
 
-    def buscar_pareceres(self, pergunta: str, k: int = 2) -> list[tuple[int, float]]:
-        """Trechos de pareceres, com a fração da consulta coberta (0 a 1, ponderada pelo IDF)."""
-        if not self.pareceres:
+    def _buscar_com_cobertura(self, pergunta: str, itens: list[Decisao], matriz, vocab, idf, k: int
+                              ) -> list[tuple[int, float, float]]:
+        """Melhores itens pelo BM25: [(índice, cobertura, força)], um por arquivo.
+
+        cobertura: fração da consulta (ponderada pelo IDF) presente no item, de 0 a 1;
+        força: nota BM25 dividida pelo IDF da consulta (acima de ~0,85, o item trata do assunto).
+        """
+        if not itens:
             return []
         consulta = termos(pergunta)
-        pontos, total_idf = self._pontuar_bm25(consulta, self.bm25_par, self.vocab_par, self.idf_par)
+        pontos, total_idf = self._pontuar_bm25(consulta, matriz, vocab, idf)
         if not total_idf:
             return []
         ordem = np.argsort(-pontos)[: k * 4]
         saida, vistos = [], set()
         for i in ordem:
-            p = self.pareceres[int(i)]
-            if p.file_id in vistos or pontos[i] <= 0:
+            item = itens[int(i)]
+            if item.file_id in vistos or pontos[i] <= 0:
                 continue
-            vistos.add(p.file_id)
-            presentes = set(termos(p.trechos[0])) | set(termos(p.titulo))
-            cobertura = sum(self.idf_par[self.vocab_par[t]] for t in set(consulta) if t in presentes and t in self.vocab_par)
-            saida.append((int(i), float(cobertura / total_idf)))
+            vistos.add(item.file_id)
+            presentes = set(termos(" ".join(item.trechos))) | set(termos(item.titulo)) | set(termos(item.assunto))
+            cobertura = sum(idf[vocab[t]] for t in set(consulta) if t in presentes and t in vocab)
+            saida.append((int(i), float(cobertura / total_idf), float(pontos[i] / total_idf)))
             if len(saida) == k:
                 break
         return saida
+
+    def buscar_entendimento(self, pergunta: str, k: int = 2) -> list[tuple[int, float, float]]:
+        """Tópicos do Entendimento das Juntas, com a fração da consulta coberta."""
+        return self._buscar_com_cobertura(pergunta, self.entendimento, getattr(self, "bm25_ent", None),
+                                          self.vocab_ent, getattr(self, "idf_ent", None), k)
+
+    def buscar_legislacao(self, pergunta: str, k: int = 2) -> list[tuple[int, float, float]]:
+        """Artigos de legislação, com a fração da consulta coberta."""
+        return self._buscar_com_cobertura(pergunta, self.legislacao, getattr(self, "bm25_leg", None),
+                                          self.vocab_leg, getattr(self, "idf_leg", None), k)
+
+    def buscar_pareceres(self, pergunta: str, k: int = 2) -> list[tuple[int, float, float]]:
+        """Trechos de pareceres, com a fração da consulta coberta."""
+        return self._buscar_com_cobertura(pergunta, self.pareceres, getattr(self, "bm25_par", None),
+                                          self.vocab_par, getattr(self, "idf_par", None), k)
+
+    def artigos_citados(self, pergunta: str, decisoes: list[int], maximo: int = 2) -> list[int]:
+        """Artigos citados na pergunta ("art. 13 da Lei 8.616") e, depois, os mais citados como
+        dispositivo transgredido nos autos das decisões encontradas (a base legal da infração)."""
+        saida = [self.artigo_citado[c] for c in normas.citacoes_da_pergunta(pergunta) if c in self.artigo_citado]
+        contagem: collections.Counter[int] = collections.Counter()
+        for i in decisoes:
+            citados = set()
+            for auto in self.decisoes[i].autos:
+                citados |= {self.artigo_citado[c] for c in normas.citacoes(auto.get("dispositivo_legal_transgredido") or "")
+                            if c in self.artigo_citado}
+            contagem.update(citados)
+        # Base legal comum a pelo menos duas decisões (ou à única decisão consultada).
+        minimo = 1 if len(decisoes) == 1 else 2
+        saida += [a for a, n in contagem.most_common() if n >= minimo]
+        return list(dict.fromkeys(saida))[:maximo]
 
     def fundamentacao_completa(self, decisao: Decisao, pergunta: str, limite: int = 3600) -> list[str]:
         """Para o caso citado na pergunta: a fundamentação inteira (ou os melhores trechos, se não achada)."""

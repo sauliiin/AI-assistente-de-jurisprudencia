@@ -17,7 +17,7 @@ import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 
-from .config import CONTEXTO, PASTA_DADOS, PORTA_LLM, THREADS, llama_server, modelo_padrao
+from .config import CONTEXTO, PASTA_DADOS, PORTA_LLM, THREADS, WINDOWS, modelo_padrao, servidores_llama
 
 
 class ErroLLM(RuntimeError):
@@ -33,6 +33,39 @@ def _morrer_com_o_pai() -> None:
         ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
     except (OSError, AttributeError):
         pass
+
+
+def _amarrar_ao_pai_windows(processo: subprocess.Popen) -> object | None:
+    """No Windows, o llama-server entra num Job Object que o encerra quando este programa morrer
+    (inclusive quando a janela é fechada). O handle do job fica aberto até o fim deste processo."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Basico(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+        class Estendido(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", Basico), ("IoInfo", ctypes.c_uint64 * 6),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        job = kernel32.CreateJobObjectW(None, None)
+        info = Estendido()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))  # 9: ExtendedLimitInformation
+        kernel32.AssignProcessToJobObject(job, int(processo._handle))
+        return job
+    except (OSError, AttributeError):
+        return None
 
 
 def _threads_padrao() -> int:
@@ -61,14 +94,25 @@ class ModeloLocal:
             return False
 
     def garantir(self, verboso: bool = True) -> None:
-        """Sobe o llama-server se ainda não houver um respondendo na porta."""
+        """Sobe o llama-server se ainda não houver um respondendo na porta (GPU primeiro; se falhar, CPU)."""
         if self._pronto():
             return
-        binario = llama_server()
-        if not binario or not binario.exists():
-            raise ErroLLM("llama-server não encontrado. Rode scripts/instalar.sh (uma vez, com internet).")
+        binarios = [b for b in servidores_llama() if b.exists()]
+        if not binarios:
+            raise ErroLLM("llama-server não encontrado. Rode python3 -m assistente.instalacao (uma vez, com internet).")
         if not self.modelo or not self.modelo.exists():
-            raise ErroLLM(f"Modelo .gguf não encontrado em {PASTA_DADOS / 'modelos'}. Rode scripts/instalar.sh.")
+            raise ErroLLM(f"Modelo .gguf não encontrado em {PASTA_DADOS / 'modelos'}. "
+                          "Rode python3 -m assistente.instalacao (uma vez, com internet).")
+        for n, binario in enumerate(binarios):
+            if self._subir(binario, verboso):
+                return
+            if verboso and n + 1 < len(binarios):
+                print("O llama.cpp não subiu com a GPU; tentando só com a CPU...", flush=True)
+        raise ErroLLM(f"llama-server terminou ao iniciar; veja {PASTA_DADOS / 'llama-server.log'}")
+
+    def _subir(self, binario: Path, verboso: bool) -> bool:
+        """True quando o servidor fica pronto; False se ele morrer ao iniciar."""
+        PASTA_DADOS.mkdir(parents=True, exist_ok=True)
         log = (PASTA_DADOS / "llama-server.log").open("ab")
         comando = [
             str(binario), "-m", str(self.modelo),
@@ -76,23 +120,33 @@ class ModeloLocal:
             "-c", str(CONTEXTO), "-t", str(self.threads), "-np", "1",
             "--jinja", "-fa", "on", "--no-webui",
         ]
-        if "vulkan" in str(binario):
+        gpu = "vulkan" in str(binario)
+        if gpu:
             comando += ["-ngl", "99"]
         if verboso:
-            print(f"Carregando o modelo {self.nome} ({self.threads} threads)...", flush=True)
-        env = {**os.environ, "LD_LIBRARY_PATH": f"{binario.parent}:{os.environ.get('LD_LIBRARY_PATH', '')}"}
-        self.processo = subprocess.Popen(
-            comando, stdout=log, stderr=subprocess.STDOUT, env=env, preexec_fn=_morrer_com_o_pai
-        )
+            print(f"Carregando o modelo {self.nome} ({'GPU' if gpu else f'CPU, {self.threads} threads'})...", flush=True)
+        env = dict(os.environ)
+        extra: dict = {}
+        if WINDOWS:
+            extra["creationflags"] = subprocess.CREATE_NO_WINDOW  # sem janela preta extra; as DLLs estão ao lado do .exe
+        else:
+            env["LD_LIBRARY_PATH"] = f"{binario.parent}:{env.get('LD_LIBRARY_PATH', '')}"
+            extra["preexec_fn"] = _morrer_com_o_pai
+        self.processo = subprocess.Popen(comando, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                         env=env, **extra)
+        if WINDOWS:
+            self._job = _amarrar_ao_pai_windows(self.processo)
         atexit.register(self.encerrar)
-        limite = time.time() + 180
+        limite = time.time() + 300
         while time.time() < limite:
             if self.processo.poll() is not None:
-                raise ErroLLM(f"llama-server terminou ao iniciar; veja {PASTA_DADOS / 'llama-server.log'}")
+                self.processo = None
+                return False
             if self._pronto():
-                return
+                return True
             time.sleep(0.5)
-        raise ErroLLM("llama-server não ficou pronto em 3 minutos.")
+        self.encerrar()
+        raise ErroLLM("llama-server não ficou pronto em 5 minutos.")
 
     def encerrar(self) -> None:
         if self.processo and self.processo.poll() is None:
@@ -133,6 +187,9 @@ class ModeloLocal:
             resp = urllib.request.urlopen(req, timeout=900)
         except urllib.error.HTTPError as erro:
             raise ErroLLM(f"llama-server respondeu {erro.code}: {erro.read()[:500]!r}") from erro
+        except (urllib.error.URLError, OSError) as erro:
+            raise ErroLLM(f"O modelo de linguagem parou de responder; feche e abra o assistente de novo. "
+                          f"Detalhes em {PASTA_DADOS / 'llama-server.log'}") from erro
         with resp:
             for linha in resp:
                 linha = linha.strip()

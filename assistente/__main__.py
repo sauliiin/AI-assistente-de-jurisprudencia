@@ -7,7 +7,10 @@ Assistente de jurisprudência.
     python3 -m assistente --so-busca "pergunta"  # mostra as fontes, sem o modelo de linguagem
 
 Tudo roda nesta máquina: o índice do acervo, a busca e o modelo de linguagem
-(llama.cpp). A internet só é usada uma vez, por scripts/instalar.sh.
+(llama.cpp). A internet só é usada para baixar o que falta (na 1ª vez: acervo,
+llama.cpp e modelo) e para atualizar o acervo quando ele muda.
+
+O executável (.exe/AppImage) sem argumentos abre a página local.
 """
 
 from __future__ import annotations
@@ -17,7 +20,8 @@ import sys
 import textwrap
 
 from .acervo import Acervo
-from .config import resolver_modelo
+from .config import EMPACOTADO, resolver_modelo
+from .instalacao import ErroInstalacao, instalar
 from .llm import ErroLLM, ModeloLocal
 from .respondedor import Assistente, Conversa
 
@@ -31,8 +35,9 @@ def _imprimir_fontes(evento: dict) -> None:
             print(f"  [{f['numero']}] Panorama do acervo")
             print(textwrap.indent(f["texto"], "       │ "))
             continue
-        if f["tipo"] == "parecer":
-            print(f"  [{f['numero']}] {f['titulo']}")
+        if f["tipo"] in ("entendimento", "legislacao", "parecer"):
+            rotulo = {"entendimento": "Entendimento das Juntas", "legislacao": "Legislação", "parecer": "Parecer"}[f["tipo"]]
+            print(f"  [{f['numero']}] {rotulo}: {f['titulo']}")
             continue
         extra = f" — {f['motivo']}" if f["motivo"] else ""
         data = "/".join(reversed(f["data"].split("-"))) if f["data"] else "data ?"
@@ -74,7 +79,29 @@ def main() -> None:
     parser.add_argument("--so-busca", action="store_true", help="só mostra as fontes encontradas")
     parser.add_argument("--fontes", type=int, default=5, help="quantas decisões enviar ao modelo (padrão 5)")
     args = parser.parse_args()
+    if EMPACOTADO and not args.pergunta and not args.so_busca:
+        args.web = True  # aberto com dois cliques: a página
 
+    if args.web:
+        from .web import servir
+
+        def preparar(progresso) -> Assistente:
+            instalar(progresso=progresso)
+            progresso("Montando o índice do acervo (só quando o acervo muda)…", None)
+            acervo = Acervo.carregar()
+            modelo = ModeloLocal(resolver_modelo(args.modelo) if args.modelo else None)
+            progresso(f"Carregando o modelo de linguagem {modelo.nome}…", None)
+            modelo.garantir()
+            return Assistente(acervo, modelo, n_fontes=args.fontes)
+
+        servir(preparar, args.porta, abrir=not args.nao_abrir, encerrar_sem_pagina=EMPACOTADO)
+        return
+
+    try:
+        instalar()
+    except ErroInstalacao as erro:
+        print(f"Erro: {erro}", file=sys.stderr)
+        sys.exit(1)
     acervo = Acervo.carregar()
     modelo = ModeloLocal(resolver_modelo(args.modelo) if args.modelo else None)
     assistente = Assistente(acervo, modelo, n_fontes=args.fontes)
@@ -87,11 +114,6 @@ def main() -> None:
         return
 
     try:
-        if args.web:
-            from .web import servir
-
-            servir(assistente, args.porta, abrir=not args.nao_abrir)
-            return
         modelo.garantir()
         if args.pergunta:
             _rodar(assistente, " ".join(args.pergunta), None, args.pensar)

@@ -7,3 +7,5 @@ venv/
 *.log
 .vscode/
 .idea/
+build/
+dist/

@@ -1,0 +1,59 @@
+# Gera o .exe (Windows) e o AppImage (Linux) do assistente.
+# Uma tag v* (ex.: git tag v1.0 && git push --tags) também publica os dois numa Release do GitHub;
+# "Run workflow" na aba Actions gera os arquivos só como artefatos, para teste.
+name: Empacotar
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  empacotar:
+    strategy:
+      matrix:
+        # Ubuntu 22.04: glibc mais antiga, para o AppImage abrir também em distribuições mais velhas.
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Dependências
+        run: python -m pip install -r requirements.txt pyinstaller certifi
+      - name: Testes
+        run: python -m unittest -v
+      - name: Empacotar
+        run: python empacotamento/empacotar.py
+      - name: Executável abre (Windows)
+        if: runner.os == 'Windows'
+        run: .\dist\Assistente-de-jurisprudencia.exe --help
+      - name: Executável abre (Linux)
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: ./dist/Assistente-de-jurisprudencia-x86_64.AppImage --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assistente-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  publicar:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: empacotar
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes \
+          "Baixe o .exe (Windows) ou o .AppImage (Linux) e abra com dois cliques. Na primeira abertura o assistente baixa o acervo, o llama.cpp e o modelo de linguagem (alguns GB); depois funciona sem internet."
