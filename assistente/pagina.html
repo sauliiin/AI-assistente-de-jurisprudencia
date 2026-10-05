@@ -47,6 +47,11 @@
   button:disabled { opacity: .5; cursor: wait; }
   .opcoes { max-width: 980px; margin: 6px auto 0; color: var(--suave); font-size: .82rem; display: flex; gap: 14px; flex-wrap: wrap; }
   .exemplos { color: var(--suave); } .exemplos button { background: var(--painel); color: var(--texto); border: 1px solid var(--borda); font-weight: 400; margin: 4px 4px 0 0; padding: 6px 10px; font-size: .88rem; }
+  header .sair { margin-left: auto; padding: 5px 12px; font-size: .85rem; }
+  .preparo { background: var(--painel); border: 1px solid var(--borda); border-radius: 10px; padding: 16px; margin-top: 18px; }
+  .preparo progress { width: 100%; height: 10px; accent-color: var(--acento); }
+  .preparo .etapa { margin: 0 0 8px; font-weight: 600; }
+  .preparo .nota { color: var(--suave); font-size: .85rem; margin: 8px 0 0; }
   @media (max-width: 600px) { .caixa { flex-wrap: wrap; } textarea { flex-basis: 100%; } }
 </style>
 </head>
@@ -54,10 +59,17 @@
 <header>
   <h1>Assistente de jurisprudência</h1>
   <span class="status" id="status">carregando…</span>
+  <button id="sair" class="sec sair" type="button" title="Fecha o assistente e libera a memória usada pelo modelo">Encerrar</button>
 </header>
 <main id="conversa">
+  <div class="preparo" id="preparo" hidden>
+    <p class="etapa" id="etapa">Preparando…</p>
+    <progress id="barra" max="1"></progress>
+    <p class="nota" id="nota">Na primeira vez o assistente baixa o acervo, o llama.cpp e o modelo de linguagem (alguns GB).
+      Pode deixar esta página aberta; depois disso ele funciona sem internet.</p>
+  </div>
   <div class="exemplos" id="exemplos">
-    <p>Funciona sem internet: a busca e o modelo de linguagem rodam neste computador. Cada resposta cita as decisões usadas; confira sempre a fonte.</p>
+    <p>Funciona sem internet: a busca e o modelo de linguagem rodam neste computador. As fontes são consultadas nesta ordem: Entendimento das Juntas, legislação, pareceres e decisões. Cada resposta cita as fontes usadas; confira sempre.</p>
     <button>Como as Juntas decidem pedidos de cancelamento de auto por cunha de terra no passeio?</button>
     <button>Quantas decisões sobre mesas e cadeiras sem licença foram deferidas?</button>
     <button>A falta de notificação prévia anula o auto de infração?</button>
@@ -67,7 +79,7 @@
 <form id="form">
   <div class="caixa">
     <textarea id="pergunta" placeholder="Pergunte sobre as decisões… (Enter envia, Shift+Enter quebra linha)" rows="1"></textarea>
-    <button id="enviar" type="submit">Perguntar</button>
+    <button id="enviar" type="submit" disabled>Perguntar</button>
     <button id="nova" class="sec" type="button" title="Começa uma conversa nova">Nova</button>
   </div>
   <div class="opcoes"><label><input type="checkbox" id="pensar"> raciocinar antes de responder (mais lento)</label></div>
@@ -77,9 +89,47 @@ const $ = (s) => document.querySelector(s);
 let conversa = null;
 const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-fetch("/api/status").then((r) => r.json()).then((s) => {
-  $("#status").textContent = `${s.decisoes.toLocaleString("pt-BR")} decisões · ${s.pareceres} pareceres · modelo ${s.modelo}`;
-}).catch(() => { $("#status").textContent = "servidor indisponível"; });
+let pronto = false;
+async function acompanhar() {
+  let s;
+  try { s = await (await fetch("/api/status")).json(); }
+  catch { $("#status").textContent = "assistente encerrado"; $("#enviar").disabled = true; return; }
+  if (s.pronto) {
+    pronto = true;
+    $("#preparo").hidden = true;
+    $("#enviar").disabled = false;
+    $("#status").textContent = `Entendimento das Juntas (${s.entendimento} tópicos) · ${s.artigos.toLocaleString("pt-BR")} artigos de legislação · `
+      + `${s.pareceres} pareceres · ${s.decisoes.toLocaleString("pt-BR")} decisões · modelo ${s.modelo}`;
+    setTimeout(acompanhar, 30000);  // sinal de vida: sem a página aberta, o app encerra sozinho
+    return;
+  }
+  $("#preparo").hidden = false;
+  $("#enviar").disabled = true;
+  $("#status").textContent = "preparando…";
+  if (s.erro) {
+    $("#etapa").textContent = "Não foi possível preparar o assistente";
+    $("#barra").hidden = true;
+    $("#nota").innerHTML = `${esc(s.erro)}<br><button type="button" id="denovo">Tentar de novo</button>`;
+    $("#denovo").onclick = async () => {
+      await fetch("/api/preparar", { method: "POST" });
+      $("#barra").hidden = false;
+      $("#nota").textContent = "";
+      acompanhar();
+    };
+    setTimeout(acompanhar, 30000);
+    return;
+  }
+  $("#etapa").textContent = s.etapa;
+  if (s.progresso == null) $("#barra").removeAttribute("value"); else $("#barra").value = s.progresso;
+  setTimeout(acompanhar, 1000);
+}
+acompanhar();
+
+$("#sair").addEventListener("click", async () => {
+  if (!confirm("Encerrar o assistente? A memória usada pelo modelo é liberada; para usar de novo, abra o programa outra vez.")) return;
+  try { await fetch("/api/encerrar", { method: "POST" }); } catch {}
+  document.body.innerHTML = '<main><p class="meta" style="font-size:1rem;margin-top:40px">Assistente encerrado. Pode fechar esta aba.</p></main>';
+});
 
 function markdown(texto, nFontes) {
   const linhas = esc(texto).split("\n");
@@ -102,8 +152,10 @@ function cartaoFonte(f) {
   if (f.tipo === "panorama") {
     return `<div class="fonte" data-n="${f.numero}"><div class="topo">[${f.numero}] Panorama do acervo</div><div class="panorama">${esc(f.texto)}</div></div>`;
   }
-  if (f.tipo === "parecer") {
-    return `<div class="fonte" data-n="${f.numero}"><div class="topo">[${f.numero}] ${esc(f.titulo)}</div>
+  if (f.tipo === "entendimento" || f.tipo === "legislacao" || f.tipo === "parecer") {
+    const rotulo = { entendimento: "Entendimento das Juntas", legislacao: "Legislação", parecer: "Parecer" }[f.tipo];
+    return `<div class="fonte" data-n="${f.numero}"><div class="topo">[${f.numero}] ${rotulo}: ${esc(f.titulo)}</div>
+      ${f.contexto ? `<div class="sub">${esc(f.contexto)}</div>` : ""}
       ${f.link ? `<a href="${esc(f.link)}" target="_blank" rel="noopener">abrir no Drive (requer internet)</a>` : ""}</div>`;
   }
   const classe = "res-" + (f.resultado || "").split(" ")[0];
@@ -181,7 +233,7 @@ $("#conversa").addEventListener("click", (e) => {
     turno.querySelector(`.fonte[data-n="${cit.dataset.n}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
   const ex = e.target.closest(".exemplos button");
-  if (ex) perguntar(ex.textContent);
+  if (ex && pronto && !$("#enviar").disabled) perguntar(ex.textContent);
 });
 $("#form").addEventListener("submit", (e) => {
   e.preventDefault();

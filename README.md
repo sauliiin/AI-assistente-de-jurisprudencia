@@ -1,8 +1,13 @@
 # Assistente de jurisprudência
 
 Responde perguntas em português sobre as decisões das Juntas Integradas de
-Julgamento Fiscal de Belo Horizonte, consultando os votos e os pareceres do
-[acervo público](https://github.com/sauliiin/jurisprudencia-juntas). Roda **sem
+Julgamento Fiscal de Belo Horizonte, consultando o
+[acervo público](https://github.com/sauliiin/jurisprudencia-juntas) nesta ordem:
+
+1. o **Entendimento das Juntas** (Vade Mecum, `ENTENDIMENTO JUNTAS 2024.docx`);
+2. a **legislação** municipal (texto vigente, artigo por artigo);
+3. os **pareceres** técnicos;
+4. as **decisões** (votos de 1ª e 2ª instância). Roda **sem
 internet e sem API paga**: a busca e o modelo de linguagem ficam no computador.
 
 Cada resposta cita as fontes usadas (`[1]`, `[2]`…). A lista de fontes
@@ -20,24 +25,57 @@ não pelo modelo, e o programa confere se as citações da resposta existem.
 
 ```text
 pergunta
-  -> busca no acervo: BM25 da decisão + BM25 do melhor trecho + rede neural do acervo (fusão RRF)
-  -> 5 decisões, só com os trechos que importam (de preferência da fundamentação) e o dispositivo
-  -> parecer técnico, quando cobre bem a pergunta
+  -> 1º Entendimento das Juntas: o tópico do Vade Mecum que trata da pergunta, se houver
+  -> 2º legislação: artigos citados na pergunta, a base legal dos autos das decisões encontradas
+     e o artigo que melhor cobre a pergunta (sem a redação revogada)
+  -> 3º parecer técnico, quando cobre bem a pergunta
+  -> 4º decisões: BM25 da decisão + BM25 do melhor trecho + rede neural do acervo (fusão RRF);
+     5 decisões, só com os trechos que importam (de preferência da fundamentação) e o dispositivo
   -> panorama: contagem exata de resultados da infração no acervo inteiro (gabarito do SIF)
-  -> modelo local (Qwen3.5 via llama.cpp) escreve a resposta citando as fontes
+  -> modelo local (Qwen3.5 via llama.cpp) escreve a resposta citando as fontes, nessa ordem de autoridade:
+     o entendimento prevalece; decisões divergentes são apontadas como divergência
   -> o programa confere se as citações existem
 ```
 
 | Arquivo | Papel |
 |---|---|
 | `assistente/acervo.py` | Índice (BM25 por decisão e por trecho, rede neural), busca, panorama |
+| `assistente/normas.py` | Lê o Entendimento das Juntas (por tópico) e a legislação (por artigo vigente) |
 | `assistente/respondedor.py` | Monta as fontes e o prompt, confere as citações |
-| `assistente/llm.py` | Sobe e conversa com o `llama-server` local (só 127.0.0.1) |
+| `assistente/llm.py` | Sobe e conversa com o `llama-server` local (só 127.0.0.1); GPU, ou CPU se a GPU falhar |
+| `assistente/instalacao.py` | Baixa o que falta (acervo, llama.cpp, modelo) e atualiza o acervo quando muda |
 | `assistente/web.py`, `pagina.html` | Página local com a resposta chegando aos poucos |
 | `assistente/texto.py` | Normalização de texto; cópia da usada no treino da rede neural |
 | `assistente/avaliar.py` | Avaliação com gabaritos tirados do próprio acervo |
 
-## Instalação
+## Executável (Windows e Linux)
+
+Para quem só quer usar: baixe da página de Releases do repositório o
+`Assistente-de-jurisprudencia.exe` (Windows) ou o
+`Assistente-de-jurisprudencia-x86_64.AppImage` (Linux; marque como executável)
+e abra com dois cliques. Não precisa instalar Python nem nada.
+
+Na primeira abertura a página mostra o progresso enquanto o programa baixa o
+acervo, o llama.cpp e o modelo (9B; 4B se a máquina tiver menos de 12 GB de
+RAM). Depois funciona sem internet; com internet, cada abertura confere se o
+acervo mudou e baixa só o que mudou. Os dados ficam em
+`%LOCALAPPDATA%\assistente-de-jurisprudencia` (Windows) ou
+`~/.local/share/assistente-de-jurisprudencia` (Linux).
+
+O botão **Encerrar** da página fecha o programa e libera a memória do modelo; o
+programa também encerra sozinho alguns minutos depois que a página é fechada.
+No Windows, fechar a janela preta também encerra.
+
+Os executáveis são gerados pelo GitHub Actions (`.github/workflows/empacotar.yml`)
+a cada tag `v*` (`git tag v1.0 && git push --tags`), que os publica numa
+Release. Para gerar localmente no sistema atual:
+
+```bash
+pip install -r requirements.txt pyinstaller certifi
+python empacotamento/empacotar.py      # -> dist/
+```
+
+## Instalação para desenvolvimento
 
 A instalação é a única etapa que usa internet:
 
@@ -51,7 +89,8 @@ O script:
 
 - clona o acervo em `../jurisprudencia-juntas` se ele ainda não estiver lá;
 - baixa o llama.cpp: a versão Vulkan, para a GPU integrada, e a de CPU, como reserva;
-- baixa o modelo para `~/.local/share/assistente-de-jurisprudencia`, fora do Git.
+- baixa o modelo para `~/.local/share/assistente-de-jurisprudencia`, fora do Git
+  (`python3 -m assistente.instalacao`, o mesmo código que o executável usa).
 
 O último modelo instalado vira o padrão.
 
@@ -88,6 +127,7 @@ O que ele sabe fazer:
 |---|---|---|
 | `ASSISTENTE_ACERVO` | `../jurisprudencia-juntas` | Onde está o acervo (`site_data/`) |
 | `ASSISTENTE_DADOS` | `~/.local/share/assistente-de-jurisprudencia` | Modelos, llama.cpp, cache do índice |
+| `ASSISTENTE_ENTENDIMENTO` | o do acervo | Um `.docx` local do Entendimento das Juntas (ex.: versão ainda não publicada) |
 | `ASSISTENTE_MODELO` | `modelos/padrao.txt` | Arquivo .gguf a usar |
 | `ASSISTENTE_GPU` | `1` | `0` roda só na CPU |
 | `ASSISTENTE_THREADS` | automático | Threads da CPU |
