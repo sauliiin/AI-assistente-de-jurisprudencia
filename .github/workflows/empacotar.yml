@@ -54,6 +54,13 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: >-
+            Baixe o .exe (Windows) ou o .AppImage (Linux) e abra com dois cliques. Na primeira abertura o
+            assistente baixa o acervo, o llama.cpp e o modelo de linguagem (alguns GB); depois funciona sem internet.
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes \
-          "Baixe o .exe (Windows) ou o .AppImage (Linux) e abra com dois cliques. Na primeira abertura o assistente baixa o acervo, o llama.cpp e o modelo de linguagem (alguns GB); depois funciona sem internet."
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A tag foi enviada de novo (ex.: git push --tags): atualiza os arquivos em vez de falhar.
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "$NOTES"
+          fi
