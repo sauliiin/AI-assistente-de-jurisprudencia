@@ -1,6 +1,6 @@
 # Gera o .exe (Windows) e o AppImage (Linux) do assistente.
 # Uma tag v* (ex.: git tag v1.0 && git push --tags) também publica os dois numa Release do GitHub;
-# "Run workflow" na aba Actions gera os arquivos só como artefatos, para teste.
+# "Run workflow" na aba Actions gera e confere os arquivos só como artefatos, para teste.
 name: Empacotar
 
 on:
@@ -16,8 +16,8 @@ jobs:
         os: [windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Dependências
@@ -34,24 +34,30 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: ./dist/Assistente-de-jurisprudencia-x86_64.AppImage --help
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: assistente-${{ runner.os }}
           path: dist/*
           if-no-files-found: error
 
   publicar:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Roda sempre, para conferir os artefatos; só cria/atualiza a Release em tags v*.
     needs: empacotar
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+      - name: Conferir executáveis
+        run: |
+          ls -la dist
+          test -s dist/Assistente-de-jurisprudencia.exe
+          test -s dist/Assistente-de-jurisprudencia-x86_64.AppImage
       - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           NOTES: >-
